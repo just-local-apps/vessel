@@ -8,10 +8,9 @@ Run only this file with:
     uv run --extra dev --extra ui-test pytest tests/test_pwa_ui.py -v
 
 The PWA is a single-view app: the calendar is the home screen. Events
-and open tasks are interleaved per day; past-due open tasks roll forward
-to today. There is no focus mode, no all-tasks mode, no in-app refresh
-button — only the calendar view, an always-visible chat row, and a
-sign-out button in the footer.
+are rendered per day. There is no task view, no all-tasks mode — only
+the calendar view, an always-visible chat row, and a sign-out button in
+the footer.
 """
 from __future__ import annotations
 
@@ -27,13 +26,11 @@ from tests._pwa_app import (  # noqa: E402
     build_app,
     make_state_full,
     make_state_with_calendar_only,
-    make_state_with_one_open_task,
+    make_state_with_one_open_event,
     start_server,
     test_now_local,
 )
-from vessel.models import StateData
-from vessel.models.enums import Cadence, ProjectStatus  # noqa: E402
-from vessel.models.state import CalendarEvent, Project  # noqa: E402
+from vessel.models import CalendarEvent, StateData
 
 
 @pytest.fixture(scope="module")
@@ -62,7 +59,6 @@ def page_factory(browser):
         ctx = browser.new_context()
         page = ctx.new_page()
         # Seed only the auth token so the sign-in dialog never fires.
-        # No mode seeding — the app always renders the calendar view.
         page.add_init_script(
             "localStorage.setItem('vessel.token', 'a-test-token-of-sufficient-length');"
         )
@@ -125,7 +121,7 @@ def test_footer_refresh_re_renders_calendar(page_factory):
     calendar so a server-side state change becomes visible without
     reloading the page."""
     today = datetime.now().date()
-    page, url, box = page_factory(make_state_with_one_open_task(today))
+    page, url, box = page_factory(make_state_with_one_open_event(today))
     _open(page, url)
 
     box["state"] = make_state_full(today)
@@ -133,209 +129,40 @@ def test_footer_refresh_re_renders_calendar(page_factory):
     _wait_for_render(page)
 
     expect(
-        page.locator('[data-testid="task-card-t-today-anytime"]')
+        page.locator('[data-testid="event-card-ev-today"]')
     ).to_be_visible()
 
 
-def test_calendar_interleaves_tasks_and_events_per_day(page_factory):
-    """Tasks and events share day groups. An event for tomorrow plus a
-    task due tomorrow both land under tomorrow's day group; an open
-    task due today lands under today's group."""
-    today = datetime.now().date()
-    project = Project(
-        id="p1", name="P", status=ProjectStatus.active, tracked=True,
-        cadence=Cadence.daily,
-        last_touched=datetime(2026, 4, 25, tzinfo=timezone.utc),
-    )
-    base = datetime(2026, 4, 25, tzinfo=timezone.utc)
-    tomorrow = today + timedelta(days=1)
-    from vessel.models.state import Task as _Task
-    from vessel.models.enums import Tier as _T, TimeWindow as _W
-
-    ev_tomorrow = CalendarEvent(
-        id="ev-meeting", project_id="p1", title="Standup", description="",
-        start=datetime.combine(tomorrow, datetime.min.time()).replace(
-            hour=10, tzinfo=timezone.utc
-        ),
-        end=datetime.combine(tomorrow, datetime.min.time()).replace(
-            hour=11, tzinfo=timezone.utc
-        ),
-    )
-    task_today = _Task(
-        id="t-today", project_id="p1", title="Today task",
-        time_window=_W.anytime, tier=_T.must_today,
-        due_date=today, estimated_minutes=15, created_at=base,
-    )
-    task_tomorrow = _Task(
-        id="t-tomorrow", project_id="p1", title="Tomorrow task",
-        time_window=_W.workday, tier=_T.flex,
-        due_date=tomorrow, estimated_minutes=15, created_at=base,
-    )
-    state = StateData(
-        projects=[project],
-        tasks=[task_today, task_tomorrow],
-        calendar=[ev_tomorrow],
-    )
-    page, url, _ = page_factory(state)
-    _open(page, url)
-
-    today_group = page.locator(f'[data-testid="calendar-day-{today.isoformat()}"]')
-    tomorrow_group = page.locator(
-        f'[data-testid="calendar-day-{tomorrow.isoformat()}"]'
-    )
-    expect(today_group.locator('[data-testid="task-card-t-today"]')).to_have_count(1)
-    expect(tomorrow_group.locator('[data-testid="task-card-t-tomorrow"]')).to_have_count(1)
-    expect(tomorrow_group.locator('[data-testid="event-card-ev-meeting"]')).to_have_count(1)
-
-
-def test_past_due_open_tasks_roll_forward_to_today(page_factory):
-    """An open task whose due_date is yesterday must surface under
-    today's group — the fluid worklist behavior the user asked for.
-    Server state is NOT mutated; this is a client-side projection."""
-    today = datetime.now().date()
-    yesterday = today - timedelta(days=1)
-    project = Project(
-        id="p1", name="P", status=ProjectStatus.active, tracked=True,
-        cadence=Cadence.daily,
-        last_touched=datetime(2026, 4, 25, tzinfo=timezone.utc),
-    )
-    base = datetime(2026, 4, 25, tzinfo=timezone.utc)
-    from vessel.models.state import Task as _Task
-    from vessel.models.enums import Tier as _T, TimeWindow as _W
-
-    stale = _Task(
-        id="t-stale", project_id="p1", title="Yesterday's leftover",
-        time_window=_W.anytime, tier=_T.must_today,
-        due_date=yesterday, estimated_minutes=15, created_at=base,
-    )
-    state = StateData(projects=[project], tasks=[stale])
-    page, url, box = page_factory(state)
-    _open(page, url)
-
-    today_group = page.locator(f'[data-testid="calendar-day-{today.isoformat()}"]')
-    expect(today_group.locator('[data-testid="task-card-t-stale"]')).to_have_count(1)
-    # Server state still says yesterday — no rewrite.
-    server_task = next(t for t in box["state"].tasks if t.id == "t-stale")
-    assert server_task.due_date == yesterday
-
-
-def test_completed_and_skipped_tasks_are_filtered(page_factory):
-    """`make_state_full` includes a completed task — it must NOT appear
+def test_completed_and_skipped_events_are_filtered(page_factory):
+    """`make_state_full` includes a completed event — it must NOT appear
     in the calendar list."""
     today = datetime.now().date()
     page, url, _ = page_factory(make_state_full(today))
     _open(page, url)
-    expect(page.locator('[data-testid="task-card-t-today-anytime"]')).to_be_visible()
-    expect(page.locator('[data-testid="task-card-t-tomorrow"]')).to_be_visible()
-    expect(page.locator('[data-testid="task-card-t-completed"]')).to_have_count(0)
+    expect(page.locator('[data-testid="event-card-ev-today"]')).to_be_visible()
+    expect(page.locator('[data-testid="event-card-ev-tomorrow"]')).to_be_visible()
+    expect(page.locator('[data-testid="event-card-ev-completed"]')).to_have_count(0)
 
 
 def test_window_label_shows_total_open_items(page_factory):
-    """The header window-label reads the count of open events + open
-    tasks rendered in the calendar view."""
+    """The header window-label reads the count of open events rendered
+    in the calendar view."""
     today = datetime.now().date()
     page, url, _ = page_factory(make_state_full(today))
     _open(page, url)
-    # make_state_full has 2 open tasks and 0 events → "2".
+    # make_state_full has 2 open events (ev-today, ev-tomorrow) and 1 completed
     expect(page.locator('[data-testid="window-label"]')).to_have_text("2")
 
 
-def test_calendar_empty_state_when_no_events_or_tasks(page_factory):
-    """If state has neither events nor open tasks, the calendar empty
-    state surfaces a plain message instead of a blank screen."""
-    today = datetime.now().date()
-    project = Project(
-        id="p1", name="P", status=ProjectStatus.active, tracked=True,
-        cadence=Cadence.daily,
-        last_touched=datetime(2026, 4, 25, tzinfo=timezone.utc),
-    )
-    state = StateData(projects=[project])
+def test_calendar_empty_state_when_no_events(page_factory):
+    """If state has no events, the calendar empty state surfaces a plain
+    message instead of a blank screen."""
+    state = StateData()
     page, url, _ = page_factory(state)
     _open(page, url)
     expect(page.locator('[data-testid="calendar-empty"]')).to_be_visible()
     expect(page.locator('[data-testid="calendar-empty"]')).to_contain_text(
         "nothing scheduled"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Per-task action buttons (done / change / cancel)
-# ---------------------------------------------------------------------------
-
-
-def test_done_button_completes_task_via_api(page_factory):
-    """Tapping `done` on a task card fires the complete endpoint and the
-    card disappears from the calendar list."""
-    today = datetime.now().date()
-    page, url, _ = page_factory(make_state_full(today))
-    _open(page, url)
-
-    expect(
-        page.locator('[data-testid="task-card-t-today-anytime"]')
-    ).to_be_visible()
-    expect(
-        page.locator('[data-testid="task-done-t-today-anytime"]')
-    ).to_be_visible()
-
-    with page.expect_response(
-        lambda r: r.url.endswith("/api/tasks/t-today-anytime/complete")
-        and r.request.method == "POST"
-        and r.status == 200
-    ):
-        page.locator('[data-testid="task-done-t-today-anytime"]').click()
-    _wait_for_render(page)
-
-    expect(
-        page.locator('[data-testid="task-card-t-today-anytime"]')
-    ).to_have_count(0)
-
-
-def test_cancel_button_prefills_chat_input(page_factory):
-    """The task `cancel` button no longer pops a dedicated skip dialog
-    — it primes the chat input with
-    `cancel/change "<title>" [id:<id>]: ` and focuses it so the user
-    types why and submits through the same chat path that handles
-    every other CRUD intent. The id is included so the chat assistant
-    can resolve the entity unambiguously (titles aren't unique)."""
-    today = datetime.now().date()
-    page, url, _ = page_factory(make_state_full(today))
-    _open(page, url)
-
-    posts: list[str] = []
-    page.on(
-        "request",
-        lambda r: posts.append(r.url) if "/skip" in r.url and r.method == "POST" else None,
-    )
-
-    page.locator('[data-testid="task-cancel-t-tomorrow"]').click()
-    # No skip dialog appears any more.
-    expect(page.locator('[data-testid="skip-dialog"]')).not_to_be_visible()
-    # Chat input is pre-filled with the change-request prefix and
-    # focused, ready for the user to type the reason.
-    chat_input = page.locator('[data-testid="chat-input"]')
-    expect(chat_input).to_have_value(
-        'cancel/change "tomorrow task" [id:t-tomorrow]: '
-    )
-    assert page.evaluate(
-        "document.activeElement === document.getElementById('chat-input')"
-    )
-    # No /skip POST should have fired — the legacy endpoint is no
-    # longer used by the UI.
-    page.wait_for_timeout(150)
-    assert posts == [], f"unexpected skip POSTs: {posts}"
-
-
-def test_change_button_opens_detail_dialog(page_factory):
-    """The `change` button opens the detail card pre-filled with the
-    task's fields so the user can edit and save."""
-    today = datetime.now().date()
-    page, url, _ = page_factory(make_state_full(today))
-    _open(page, url)
-
-    page.locator('[data-testid="task-change-t-tomorrow"]').click()
-    expect(page.locator('[data-testid="detail-dialog"]')).to_be_visible()
-    expect(page.locator('[data-testid="detail-title"]')).to_have_value(
-        "tomorrow task"
     )
 
 
@@ -348,8 +175,7 @@ def test_calendar_event_card_has_only_cancel_change_button(page_factory):
     """Event cards expose a single quiet `cancel/change` button. It
     primes the chat input with `cancel/change "<title>" [id:<id>]: `
     instead of opening a dedicated skip-reason dialog — every
-    change-intent goes through the chat assistant now. Done + change
-    buttons are not rendered on event cards."""
+    change-intent goes through the chat assistant now."""
     today = datetime.now().date()
     page, url, _ = page_factory(make_state_with_calendar_only(today))
     _open(page, url)
@@ -382,25 +208,20 @@ def test_calendar_event_card_has_only_cancel_change_button(page_factory):
     assert posts == [], f"unexpected /skip POSTs: {posts}"
 
 
-def test_completed_and_skipped_events_are_filtered(page_factory):
+def test_completed_and_skipped_calendar_events_are_filtered(page_factory):
     """Calendar mode hides events the user marked done or explicitly
     skipped — closed items leave the list."""
     today = datetime.now().date()
     base = datetime(2026, 4, 25, tzinfo=timezone.utc)
-    project = Project(
-        id="p1", name="P", status=ProjectStatus.active, tracked=True,
-        cadence=Cadence.event_driven, last_touched=base,
-    )
     future = lambda hours: datetime.now(timezone.utc) + timedelta(hours=hours)
     state = StateData(
-        projects=[project],
         calendar=[
-            CalendarEvent(id="ev-open", project_id="p1", title="Open meeting",
+            CalendarEvent(id="ev-open", title="Open meeting",
                           description="", start=future(2), end=future(3)),
-            CalendarEvent(id="ev-done", project_id="p1", title="Already done",
+            CalendarEvent(id="ev-done", title="Already done",
                           description="", start=future(4), end=future(5),
                           completed_at=base),
-            CalendarEvent(id="ev-skipped", project_id="p1",
+            CalendarEvent(id="ev-skipped",
                           title="Already skipped",
                           description="", start=future(6), end=future(7),
                           skipped_at=base, skip_reason="not relevant"),
@@ -488,23 +309,18 @@ def test_overlapping_calendar_events_render_side_by_side_with_red(page_factory):
     """Two events whose time ranges intersect render inside a flex
     `.overlap-cluster` row and pick up the red conflict styling."""
     today = datetime.now().date()
-    project = Project(
-        id="p1", name="Demo", status=ProjectStatus.active, tracked=True,
-        cadence=Cadence.event_driven,
-        last_touched=datetime(2026, 4, 25, tzinfo=timezone.utc),
-    )
     base = datetime.combine(
         today + timedelta(days=1), datetime.min.time()
     ).replace(hour=10, tzinfo=timezone.utc)
     a = CalendarEvent(
-        id="ev-a", project_id="p1", title="Event A", description="",
+        id="ev-a", title="Event A", description="",
         start=base, end=base + timedelta(hours=1),
     )
     b = CalendarEvent(
-        id="ev-b", project_id="p1", title="Event B", description="",
+        id="ev-b", title="Event B", description="",
         start=base + timedelta(minutes=30), end=base + timedelta(hours=2),
     )
-    state = StateData(projects=[project], calendar=[a, b])
+    state = StateData(calendar=[a, b])
     page, url, _ = page_factory(state)
     _open(page, url)
 
@@ -542,20 +358,15 @@ def test_arrive_by_renders_on_event_card_when_set(page_factory):
     """If `arrive_by` is set on an event, the meta line shows it
     alongside the start/end range."""
     today = datetime.now().date()
-    project = Project(
-        id="p1", name="Demo", status=ProjectStatus.active, tracked=True,
-        cadence=Cadence.event_driven,
-        last_touched=datetime(2026, 4, 25, tzinfo=timezone.utc),
-    )
     base_dt = datetime.combine(
         today + timedelta(days=1), datetime.min.time()
     ).replace(hour=10, tzinfo=timezone.utc)
     ev = CalendarEvent(
-        id="ev-doc", project_id="p1", title="Doctor", description="",
+        id="ev-doc", title="Doctor", description="",
         start=base_dt, end=base_dt + timedelta(minutes=30),
         arrive_by=base_dt - timedelta(minutes=15),
     )
-    state = StateData(projects=[project], calendar=[ev])
+    state = StateData(calendar=[ev])
     page, url, _ = page_factory(state)
     _open(page, url)
 
@@ -567,7 +378,7 @@ def test_arrive_by_renders_on_event_card_when_set(page_factory):
 
 
 # ---------------------------------------------------------------------------
-# Card color identity (light blue events, grey tasks, red conflicts)
+# Card color identity (light blue events, red conflicts)
 # ---------------------------------------------------------------------------
 
 
@@ -592,29 +403,6 @@ def test_event_cards_render_with_light_blue_palette(page_factory):
     # (well above 128). The current palette uses #dbeafe ≈ rgb(219,234,254).
     assert b > 200 and g > 200 and r > 200 and b >= r, (
         f"expected light-blue event card, got rgb({r},{g},{b})"
-    )
-
-
-def test_task_cards_render_with_grey_palette(page_factory):
-    """`data-kind="task"` cards get the grey palette so the worklist
-    items read as 'flexible / fit between events' next to the blue
-    event blocks."""
-    today = datetime.now().date()
-    page, url, _ = page_factory(make_state_full(today))
-    _open(page, url)
-
-    bg = page.evaluate(
-        """() => getComputedStyle(
-            document.querySelector('[data-testid="task-card-t-today-anytime"]')
-        ).backgroundColor"""
-    )
-    m = re.search(r"rgb\((\d+),\s*(\d+),\s*(\d+)", bg)
-    assert m, bg
-    r, g, b = (int(x) for x in m.groups())
-    # Grey: all channels close to each other, in the mid-to-light range.
-    spread = max(r, g, b) - min(r, g, b)
-    assert spread < 20 and 150 < r < 230, (
-        f"expected grey task card, got rgb({r},{g},{b})"
     )
 
 
@@ -653,20 +441,6 @@ def _user_select_value(page: Page, selector: str) -> str:
     )
 
 
-def test_task_card_text_is_selectable_for_copy(page_factory):
-    """Task card titles opt into native text selection so a long-press
-    or drag fills the clipboard selection with the chosen text."""
-    today = datetime.now().date()
-    page, url, _ = page_factory(make_state_full(today))
-    _open(page, url)
-
-    title_sel = '[data-testid="task-card-t-today-anytime"] .task-title'
-    expect(page.locator(title_sel)).to_be_visible()
-    assert _user_select_value(page, title_sel) == "text"
-    selected = _select_element_text(page, title_sel)
-    assert selected and "anytime today" in selected, selected
-
-
 def test_calendar_event_text_is_selectable_for_copy(page_factory):
     """Event titles and the inline description block are both
     selectable so the user can long-press / drag to copy them out."""
@@ -684,39 +458,6 @@ def test_calendar_event_text_is_selectable_for_copy(page_factory):
     expect(page.locator(notes_sel)).to_be_visible()
     selected_notes = _select_element_text(page, notes_sel)
     assert selected_notes and "cardio + lift" in selected_notes
-
-
-# ---------------------------------------------------------------------------
-# Push API (still callable, even though no UI gesture drives it)
-# ---------------------------------------------------------------------------
-
-
-def test_push_api_still_moves_task_to_next_day(page_factory):
-    """The /api/tasks/{id}/push endpoint still exists for any caller
-    (CLI, scheduled jobs, future re-introduction) even though no UI
-    surface drives it."""
-    today = datetime.now().date()
-    page, url, _ = page_factory(make_state_full(today))
-    _open(page, url)
-
-    payload = page.evaluate(
-        """
-        async () => {
-          const t = localStorage.getItem('vessel.token');
-          const r = await fetch('/api/tasks/t-today-anytime/push', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: 'Bearer ' + t,
-            },
-            body: JSON.stringify({ days: 1 }),
-          });
-          return { status: r.status, body: await r.json() };
-        }
-        """
-    )
-    assert payload["status"] == 200, payload
-    assert payload["body"]["ok"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -776,8 +517,10 @@ def test_chat_applies_in_one_shot_and_renders_popup_cards(page_factory):
     class _FakeResp:
         choices: list[_FakeChoice]
 
-    # Add a task (project p1 already exists in make_state_full) so the
-    # popup card shows up as a clickable task entry in the stack.
+    # Add a calendar event so the popup card shows up.
+    new_start = datetime.combine(
+        today + timedelta(days=1), datetime.min.time()
+    ).replace(hour=9, tzinfo=timezone.utc)
     queue = [
         _FakeMsg(
             content="",
@@ -785,14 +528,11 @@ def test_chat_applies_in_one_shot_and_renders_popup_cards(page_factory):
                 _FakeToolCall(
                     id="call_0",
                     function=_FnCall(
-                        name="add_task",
+                        name="add_calendar_event",
                         arguments=json.dumps({"fields": {
-                            "id": "t-file-taxes",
-                            "project_id": "p1",
                             "title": "file taxes",
-                            "tier": "must_today",
-                            "due_date": today.isoformat(),
-                            "estimated_minutes": 30,
+                            "start": new_start.isoformat(),
+                            "end": (new_start + timedelta(hours=1)).isoformat(),
                         }}),
                     ),
                 )
@@ -816,207 +556,20 @@ def test_chat_applies_in_one_shot_and_renders_popup_cards(page_factory):
     _open(page, url)
 
     chat_input = page.locator('[data-testid="chat-input"]')
-    chat_input.fill("remind me to file taxes today")
+    chat_input.fill("remind me to file taxes tomorrow morning")
     page.locator('[data-testid="chat-send"]').click()
 
-    # Popup stack becomes visible with a card for the new task.
+    # Popup stack becomes visible with a card for the new event.
     results = page.locator('[data-testid="chat-results"]')
     expect(results).to_be_visible()
-    card = page.locator(
-        '[data-testid="chat-result-task-added-t-file-taxes"]'
-    )
-    expect(card).to_be_visible()
-    expect(card).to_contain_text("file taxes")
+    # The card for the added event should exist
+    added_cards = page.locator('[data-testid^="chat-result-event-added-"]')
+    expect(added_cards.first).to_be_visible()
     # Text reply bubble stays empty when something applied.
     expect(page.locator('[data-testid="chat-question"]')).to_be_hidden()
     assert chat_input.input_value() == ""
-    assert any(t.id == "t-file-taxes" for t in box["state"].tasks)
-
-
-def test_chat_popup_click_opens_detail_dialog(page_factory):
-    """Tapping a popup card opens the same detail/edit modal a card
-    tap would. Closing the dialog leaves the popup in place so the
-    user can revisit or dismiss it explicitly."""
-    today = datetime.now().date()
-
-    import json
-    from dataclasses import dataclass, field
-
-    @dataclass
-    class _FnCall:
-        name: str
-        arguments: str
-
-    @dataclass
-    class _FakeToolCall:
-        id: str
-        function: _FnCall
-        type: str = "function"
-
-    @dataclass
-    class _FakeMsg:
-        content: str = ""
-        tool_calls: list = field(default_factory=list)
-
-    @dataclass
-    class _FakeChoice:
-        message: _FakeMsg
-
-    @dataclass
-    class _FakeResp:
-        choices: list[_FakeChoice]
-
-    queue = [
-        _FakeMsg(
-            content="",
-            tool_calls=[
-                _FakeToolCall(
-                    id="call_0",
-                    function=_FnCall(
-                        name="add_task",
-                        arguments=json.dumps({"fields": {
-                            "id": "t-popup-edit",
-                            "project_id": "p1",
-                            "title": "edit me",
-                            "tier": "flex",
-                            "due_date": today.isoformat(),
-                            "estimated_minutes": 10,
-                        }}),
-                    ),
-                )
-            ],
-        ),
-        _FakeMsg(content="added edit me"),
-    ]
-
-    class _Client:
-        def __init__(self):
-            self.chat = self
-            self.completions = self
-
-        async def create(self, **_kwargs):
-            msg = queue.pop(0) if queue else _FakeMsg(content="(done)")
-            return _FakeResp(choices=[_FakeChoice(message=msg)])
-
-    page, url, _ = page_factory(
-        make_state_full(today), chat_client=_Client()
-    )
-    _open(page, url)
-
-    page.locator('[data-testid="chat-input"]').fill("add edit me task")
-    page.locator('[data-testid="chat-send"]').click()
-
-    card = page.locator(
-        '[data-testid="chat-result-task-added-t-popup-edit"]'
-    )
-    expect(card).to_be_visible()
-    card.click()
-    expect(page.locator('[data-testid="detail-dialog"]')).to_be_visible()
-    expect(page.locator('[data-testid="detail-title"]')).to_have_value("edit me")
-
-    # Close the modal — the popup must still be there so the user
-    # can come back to it.
-    page.locator('[data-testid="detail-cancel"]').click()
-    expect(page.locator('[data-testid="detail-dialog"]')).to_be_hidden()
-    expect(card).to_be_visible()
-
-
-def test_chat_popup_dismiss_removes_only_that_card(page_factory):
-    """Each popup carries an × button. Dismissing one card must NOT
-    remove the others — the chat may produce several items and the
-    user wants to walk through them one at a time."""
-    today = datetime.now().date()
-
-    import json
-    from dataclasses import dataclass, field
-
-    @dataclass
-    class _FnCall:
-        name: str
-        arguments: str
-
-    @dataclass
-    class _FakeToolCall:
-        id: str
-        function: _FnCall
-        type: str = "function"
-
-    @dataclass
-    class _FakeMsg:
-        content: str = ""
-        tool_calls: list = field(default_factory=list)
-
-    @dataclass
-    class _FakeChoice:
-        message: _FakeMsg
-
-    @dataclass
-    class _FakeResp:
-        choices: list[_FakeChoice]
-
-    queue = [
-        _FakeMsg(
-            content="",
-            tool_calls=[
-                _FakeToolCall(
-                    id="c0",
-                    function=_FnCall(
-                        name="add_task",
-                        arguments=json.dumps({"fields": {
-                            "id": "t-a",
-                            "project_id": "p1",
-                            "title": "task A",
-                            "tier": "flex",
-                            "due_date": today.isoformat(),
-                            "estimated_minutes": 10,
-                        }}),
-                    ),
-                ),
-                _FakeToolCall(
-                    id="c1",
-                    function=_FnCall(
-                        name="add_task",
-                        arguments=json.dumps({"fields": {
-                            "id": "t-b",
-                            "project_id": "p1",
-                            "title": "task B",
-                            "tier": "flex",
-                            "due_date": today.isoformat(),
-                            "estimated_minutes": 10,
-                        }}),
-                    ),
-                ),
-            ],
-        ),
-        _FakeMsg(content="added two"),
-    ]
-
-    class _Client:
-        def __init__(self):
-            self.chat = self
-            self.completions = self
-
-        async def create(self, **_kwargs):
-            msg = queue.pop(0) if queue else _FakeMsg(content="(done)")
-            return _FakeResp(choices=[_FakeChoice(message=msg)])
-
-    page, url, _ = page_factory(
-        make_state_full(today), chat_client=_Client()
-    )
-    _open(page, url)
-
-    page.locator('[data-testid="chat-input"]').fill("add A and B")
-    page.locator('[data-testid="chat-send"]').click()
-
-    card_a = page.locator('[data-testid="chat-result-task-added-t-a"]')
-    card_b = page.locator('[data-testid="chat-result-task-added-t-b"]')
-    expect(card_a).to_be_visible()
-    expect(card_b).to_be_visible()
-
-    # Dismiss card A's × — B should still be visible.
-    card_a.locator(".chat-result-close").click()
-    expect(card_a).to_have_count(0)
-    expect(card_b).to_be_visible()
+    # The new event should be in the state
+    assert any(e.title == "file taxes" for e in box["state"].calendar)
 
 
 def test_chat_handles_empty_input_silently(page_factory):

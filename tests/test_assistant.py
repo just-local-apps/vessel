@@ -8,23 +8,19 @@ Test coverage:
 - One-shot completion (no tool calls) → final_message lands.
 - Single tool call → executed against state, result fed back, then
   model finishes.
-- Multiple tool calls in one assistant turn (the bulk-delete pattern)
-  → all execute.
+- Multiple tool calls in one assistant turn → all execute.
 - Cap fires after MAX_TOOL_CALLS and stops the loop cleanly.
-- CRUD error from a tool call comes back to the model as a
-  `kind:"…"` envelope and the loop continues.
+- CRUD error from a tool call comes back to the model and the loop continues.
 - Unknown tool name → marked as error in the LoopResult.
 - Invalid JSON args → marked as error, loop continues.
-- skip_assistant happy path: "delete all wash dishes" → all open
-  Wash dishes tasks deleted; final_message present.
-- skip_assistant ignores the just-skipped task in its prompt (it's
-  already archived).
+- skip_assistant happy path: "moved to next Friday" creates new event.
+- skip_assistant does nothing when reason has no actionable intent.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -32,9 +28,7 @@ import pytest
 from vessel.assistant import run_skip_assistant
 from vessel.assistant.tool_loop import MAX_TOOL_CALLS, ToolCall, tool_loop
 from vessel.assistant.tool_schema import TOOLS
-from vessel.models import StateData
-from vessel.models.enums import Cadence, ProjectStatus, Tier, TimeWindow
-from vessel.models.state import Project, Task
+from vessel.models import CalendarEvent, StateData
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +93,6 @@ class _ScriptedLLM:
     async def __call__(self, **kwargs) -> _FakeResp:
         self.calls.append(kwargs)
         if not self._queue:
-            # Default: empty completion = "I'm done".
             return _resp(_msg(text="(done)"))
         return _resp(self._queue.pop(0))
 
@@ -109,40 +102,22 @@ class _ScriptedLLM:
 # ---------------------------------------------------------------------------
 
 
-def _seed_project(state: StateData, pid: str = "p_demo", name: str = "Demo") -> None:
-    state.projects.append(
-        Project(
-            id=pid,
-            name=name,
-            status=ProjectStatus.active,
-            tracked=True,
-            cadence=Cadence.event_driven,
-            last_touched=datetime(2026, 4, 28, tzinfo=timezone.utc),
-        )
+def _seed_event(
+    state: StateData,
+    eid: str = "ev1",
+    title: str = "Test event",
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> CalendarEvent:
+    now = start or datetime(2026, 5, 1, 9, tzinfo=timezone.utc)
+    ev = CalendarEvent(
+        id=eid,
+        title=title,
+        start=now,
+        end=end or now + timedelta(hours=1),
     )
-
-
-def _seed_wash_dishes(state: StateData, dates: list[date]) -> list[str]:
-    """Insert one open 'Wash dishes' task per date. Returns the ids."""
-    ids = []
-    base_dt = datetime(2026, 4, 28, tzinfo=timezone.utc)
-    for d in dates:
-        suffix = d.strftime("%Y%m%d")
-        tid = f"task_wash_dishes_{suffix}"
-        state.tasks.append(
-            Task(
-                id=tid,
-                project_id="p_demo",
-                title="Wash dishes",
-                time_window=TimeWindow.evening,
-                tier=Tier.flex,
-                estimated_minutes=15,
-                due_date=d,
-                created_at=base_dt,
-            )
-        )
-        ids.append(tid)
-    return ids
+    state.calendar.append(ev)
+    return ev
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +145,11 @@ async def test_tool_loop_no_tool_calls_returns_final_message():
 @pytest.mark.asyncio
 async def test_tool_loop_executes_a_single_delete_then_finishes():
     state = StateData()
-    _seed_project(state)
-    ids = _seed_wash_dishes(state, [date(2026, 4, 30)])
+    ev = _seed_event(state, "ev-delete-me")
     fake = _ScriptedLLM(
         [
-            _msg(calls=[("delete_task", {"id": ids[0]})]),
-            _msg(text="deleted 1 task"),
+            _msg(calls=[("delete_calendar_event", {"id": ev.id})]),
+            _msg(text="deleted 1 event"),
         ]
     )
     result = await tool_loop(
@@ -184,21 +158,26 @@ async def test_tool_loop_executes_a_single_delete_then_finishes():
     )
     assert result.stopped_reason == "completed"
     assert len(result.tool_calls) == 1
-    assert result.tool_calls[0].name == "delete_task"
+    assert result.tool_calls[0].name == "delete_calendar_event"
     assert result.tool_calls[0].error is None
-    assert state.tasks == []  # task actually removed from state
+    assert state.calendar == []
 
 
 @pytest.mark.asyncio
 async def test_tool_loop_executes_multiple_tool_calls_in_one_assistant_turn():
     state = StateData()
-    _seed_project(state)
-    ids = _seed_wash_dishes(
-        state, [date(2026, 4, 30), date(2026, 5, 1), date(2026, 5, 2)]
-    )
+    ids = []
+    for i in range(3):
+        ev = _seed_event(
+            state,
+            eid=f"ev-{i}",
+            title=f"Event {i}",
+            start=datetime(2026, 5, i + 1, 9, tzinfo=timezone.utc),
+        )
+        ids.append(ev.id)
     fake = _ScriptedLLM(
         [
-            _msg(calls=[("delete_task", {"id": tid}) for tid in ids]),
+            _msg(calls=[("delete_calendar_event", {"id": eid}) for eid in ids]),
             _msg(text="deleted 3"),
         ]
     )
@@ -209,18 +188,19 @@ async def test_tool_loop_executes_multiple_tool_calls_in_one_assistant_turn():
     assert result.stopped_reason == "completed"
     assert len(result.tool_calls) == 3
     assert all(c.error is None for c in result.tool_calls)
-    assert state.tasks == []
+    assert state.calendar == []
 
 
 @pytest.mark.asyncio
 async def test_tool_loop_caps_at_max_tool_calls():
     state = StateData()
-    _seed_project(state)
-    # Always emit one tool call, never finish — the cap must stop us.
+
     class _Forever:
         calls: list = []
+
         async def __call__(self, **kwargs):
             return _resp(_msg(calls=[("get_state", {})]))
+
     forever = _Forever()
     result = await tool_loop(
         chat_complete=forever, model="x", system_prompt="x",
@@ -234,10 +214,9 @@ async def test_tool_loop_caps_at_max_tool_calls():
 @pytest.mark.asyncio
 async def test_tool_loop_crud_error_does_not_kill_loop():
     state = StateData()
-    _seed_project(state)
     fake = _ScriptedLLM(
         [
-            _msg(calls=[("delete_task", {"id": "task_does_not_exist"})]),
+            _msg(calls=[("delete_calendar_event", {"id": "does-not-exist"})]),
             _msg(text="oops, not found"),
         ]
     )
@@ -272,22 +251,18 @@ async def test_tool_loop_unknown_tool_name_marked_error():
 @pytest.mark.asyncio
 async def test_tool_loop_invalid_json_args_marked_error():
     state = StateData()
-    # Hand-craft a bad-args call (raw arguments string isn't valid JSON).
     bad = _FakeMessage(
         content="",
         tool_calls=[
             _FakeToolCall(id="c0", function=_FnCall(name="get_state", arguments="not json"))
         ],
     )
-    class _Once:
-        async def __call__(self, **kwargs):
-            return _resp(bad if not getattr(self, "fired", False) else _msg(text="done"))
-    fake = _Once()
-    # Two-step trick so the first call returns bad, the second returns done.
     state2 = {"step": 0}
+
     async def two_step(**kwargs):
         state2["step"] += 1
         return _resp(bad if state2["step"] == 1 else _msg(text="done"))
+
     result = await tool_loop(
         chat_complete=two_step, model="x", system_prompt="x",
         user_message="x", state=state, tools=TOOLS,
@@ -302,32 +277,30 @@ async def test_tool_loop_invalid_json_args_marked_error():
 
 
 @pytest.mark.asyncio
-async def test_skip_assistant_deletes_all_wash_dishes_when_reason_says_so():
-    """End-to-end: user skipped one wash-dishes with reason "no more".
-    The assistant gets the reason + state and is expected to call
-    delete_task on every other open Wash dishes."""
+async def test_skip_assistant_creates_new_event_when_reason_says_reschedule():
+    """End-to-end: user skipped a dentist appointment with reason 'moved to
+    next Friday'. The assistant creates a new calendar event."""
     state = StateData()
-    _seed_project(state)
-    ids = _seed_wash_dishes(
-        state,
-        [date(2026, 5, 1), date(2026, 5, 2), date(2026, 5, 3)],
+    skipped = CalendarEvent(
+        id="cal_dentist_20260501",
+        title="Dentist",
+        start=datetime(2026, 5, 1, 10, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 1, 10, 30, tzinfo=timezone.utc),
+        skipped_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        skip_reason="moved to next Friday",
     )
-    skipped = Task(
-        id="task_wash_dishes_20260430",
-        project_id="p_demo",
-        title="Wash dishes",
-        time_window=TimeWindow.evening,
-        tier=Tier.flex,
-        estimated_minutes=15,
-        due_date=date(2026, 4, 30),
-        created_at=datetime(2026, 4, 28, tzinfo=timezone.utc),
-        skipped_at=datetime(2026, 4, 30, tzinfo=timezone.utc),
-        skip_reason="back pain. no more wash dishes",
-    )
+    new_start = datetime(2026, 5, 8, 10, tzinfo=timezone.utc)
     fake = _ScriptedLLM(
         [
-            _msg(calls=[("delete_task", {"id": tid}) for tid in ids]),
-            _msg(text="deleted 3 wash-dishes tasks"),
+            _msg(calls=[(
+                "add_calendar_event",
+                {"fields": {
+                    "title": "Dentist",
+                    "start": new_start.isoformat(),
+                    "end": (new_start + timedelta(minutes=30)).isoformat(),
+                }},
+            )]),
+            _msg(text="rescheduled dentist to next Friday"),
         ]
     )
 
@@ -341,34 +314,30 @@ async def test_skip_assistant_deletes_all_wash_dishes_when_reason_says_so():
             return await self._fn(**kwargs)
 
     result = await run_skip_assistant(
-        reason="back pain. no more wash dishes",
+        reason="moved to next Friday",
         skipped_task=skipped,
         state=state,
         client=_Client(fake),
         model="x",
     )
     assert result.stopped_reason == "completed"
-    assert len(result.mutating_calls()) == 3
-    assert all(t.title != "Wash dishes" for t in state.tasks), state.tasks
-    assert "deleted" in result.final_message.lower()
+    assert len(result.mutating_calls()) == 1
+    assert len(state.calendar) == 1
+    assert state.calendar[0].title == "Dentist"
+    assert "rescheduled" in result.final_message.lower()
 
 
 @pytest.mark.asyncio
 async def test_skip_assistant_does_nothing_when_reason_is_just_explanation():
-    """Reason like "didn't feel like it" — the assistant should reply
+    """Reason like "just not feeling it" — the assistant should reply
     with a text message and not call any tools."""
     state = StateData()
-    _seed_project(state)
-    _seed_wash_dishes(state, [date(2026, 5, 1)])
-    skipped = Task(
-        id="task_wash_dishes_20260430",
-        project_id="p_demo",
-        title="Wash dishes",
-        time_window=TimeWindow.evening,
-        tier=Tier.flex,
-        estimated_minutes=15,
-        due_date=date(2026, 4, 30),
-        created_at=datetime(2026, 4, 28, tzinfo=timezone.utc),
+    ev = _seed_event(state, "ev-gym", "Gym")
+    skipped = CalendarEvent(
+        id="cal_gym_20260501",
+        title="Gym",
+        start=datetime(2026, 5, 1, 7, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 1, 8, tzinfo=timezone.utc),
     )
     fake = _ScriptedLLM([_msg(text="ok, just for today")])
 
@@ -382,29 +351,26 @@ async def test_skip_assistant_does_nothing_when_reason_is_just_explanation():
             return await self._fn(**kwargs)
 
     result = await run_skip_assistant(
-        reason="didn't feel like it tonight",
+        reason="just not feeling it tonight",
         skipped_task=skipped,
         state=state,
         client=_Client(fake),
         model="x",
     )
     assert result.tool_calls == []
-    assert len(state.tasks) == 1  # the future wash-dishes survives
+    assert len(state.calendar) == 1  # the original ev-gym survives
 
 
 @pytest.mark.asyncio
 async def test_skip_assistant_user_message_carries_today_date():
-    """Regression: the LLM was inventing yesterday's date for new
-    tasks because it had no temporal grounding. The user message must
-    now include the current local datetime, the weekday, and an
-    explicit 'due_date >= today' rule."""
+    """The user message must include the current local datetime, the weekday,
+    and an explicit 'start >= today' rule."""
     state = StateData()
-    _seed_project(state)
-    skipped = Task(
-        id="task_x_20260429", project_id="p_demo", title="x",
-        time_window=TimeWindow.anytime, tier=Tier.flex,
-        estimated_minutes=5, due_date=date(2026, 4, 29),
-        created_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+    skipped = CalendarEvent(
+        id="cal_x_20260429",
+        title="Meeting",
+        start=datetime(2026, 4, 29, 10, tzinfo=timezone.utc),
+        end=datetime(2026, 4, 29, 11, tzinfo=timezone.utc),
     )
     captured: list[dict[str, Any]] = []
 
@@ -433,33 +399,22 @@ async def test_skip_assistant_user_message_carries_today_date():
     user_msg = next(
         m["content"] for m in captured[0]["messages"] if m["role"] == "user"
     )
-    # Header carries the absolute timestamp, the weekday name, and the
-    # ISO date — three independent anchors so the model can't latch on
-    # to a stale prior.
     assert "2026-04-29" in user_msg
     assert "Wednesday" in user_msg  # 2026-04-29 is a Wednesday
     assert "Now:" in user_msg
-    # The "due_date MUST be on or after" guardrail is present.
     assert "MUST be on or after 2026-04-29" in user_msg
 
 
 @pytest.mark.asyncio
-async def test_skip_assistant_user_message_includes_reason_and_state_summary():
-    """Inspect the prompt the assistant sends — it must carry the
-    reason verbatim and a list of currently-open tasks so the model
-    can act without an extra get_state round-trip."""
+async def test_skip_assistant_user_message_includes_reason_and_event_summary():
+    """The prompt must carry the reason verbatim and include the event summary."""
     state = StateData()
-    _seed_project(state)
-    _seed_wash_dishes(state, [date(2026, 5, 1), date(2026, 5, 2)])
-    skipped = Task(
-        id="task_wash_dishes_20260430",
-        project_id="p_demo",
-        title="Wash dishes",
-        time_window=TimeWindow.evening,
-        tier=Tier.flex,
-        estimated_minutes=15,
-        due_date=date(2026, 4, 30),
-        created_at=datetime(2026, 4, 28, tzinfo=timezone.utc),
+    _seed_event(state, "ev-upcoming", "Doctor")
+    skipped = CalendarEvent(
+        id="cal_dentist_20260501",
+        title="Dentist",
+        start=datetime(2026, 5, 1, 10, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 1, 10, 30, tzinfo=timezone.utc),
     )
     captured: list[dict[str, Any]] = []
 
@@ -477,7 +432,7 @@ async def test_skip_assistant_user_message_includes_reason_and_state_summary():
             return await self._fn(**kwargs)
 
     await run_skip_assistant(
-        reason="back pain, no more wash dishes",
+        reason="moved to next week",
         skipped_task=skipped,
         state=state,
         client=_Client(capture),
@@ -486,10 +441,8 @@ async def test_skip_assistant_user_message_includes_reason_and_state_summary():
     user_msg = next(
         m["content"] for m in captured[0]["messages"] if m["role"] == "user"
     )
-    assert "back pain, no more wash dishes" in user_msg
-    assert "Wash dishes" in user_msg
-    # The skipped task is named in the header (so the model knows what
-    # was just archived) — but it must NOT appear in the open-tasks
-    # list. Split on the open-tasks header and check only that section.
-    open_section = user_msg.split("Open tasks currently in state")[1]
+    assert "moved to next week" in user_msg
+    assert "Dentist" in user_msg
+    # The skipped event's id must NOT appear in the open-events list.
+    open_section = user_msg.split("Upcoming calendar events")[1]
     assert skipped.id not in open_section
