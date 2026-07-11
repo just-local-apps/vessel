@@ -44,26 +44,13 @@ def _text(result: Any) -> str:
 
 
 async def _cleanup_marker(marker: str) -> None:
-    """Delete every project / task / calendar entry created during a
-    probe run that carries `marker` in its id, title, or notes. Logs
-    the outcome and never raises — failures here can't be allowed to
-    mask a real assertion failure in the calling test. Also retires
-    the "Deploy Probes" project (used by the Phoenix probe test) if
-    it ends up empty.
-
-    The marker arrives as `<prefix>-<hex>` but the intake agent invents
-    slug ids using underscores (e.g. `task_gym_<hex>` from a
-    `deploy-probe-<hex>` marker), so a literal substring match misses
-    the very thing we just created. We feed BOTH forms into the
-    instruction so the LLM matches either."""
+    """Delete every calendar entry created during a probe run that carries
+    `marker` in its id, title, or description. Logs outcome, never raises."""
     hex_suffix = marker.rsplit("-", 1)[-1]
     instruction = (
-        f"Cleanup task: delete every project, task, and calendar entry "
-        f"whose id, title, or notes contains either the substring "
-        f"{marker!r} OR the substring {hex_suffix!r}. ALSO delete any "
-        "project named 'Deploy Probes' or 'Phoenix Probe' if it has no "
-        "remaining tasks. Apply immediately. Do not ask clarifying "
-        "questions. If nothing matches, return state unchanged."
+        f"Cleanup: delete every calendar entry whose id, title, or description "
+        f"contains either {marker!r} OR {hex_suffix!r}. Apply immediately. "
+        "If nothing matches, return state unchanged."
     )
     try:
         async with sse_client(_sse_url()) as (read, write):
@@ -79,10 +66,7 @@ async def _cleanup_marker(marker: str) -> None:
             print(f"[cleanup {marker}] non-JSON response: {txt[:200]}")
             return
         diff = data.get("diff") or {}
-        removed = sum(
-            len((diff.get(b) or {}).get("removed") or [])
-            for b in ("projects", "tasks", "calendar")
-        )
+        removed = len((diff.get("calendar") or {}).get("removed") or [])
         print(f"[cleanup {marker}] applied={data.get('applied')} removed={removed}")
     except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
         print(f"[cleanup {marker}] FAILED: {exc!r}")
@@ -118,25 +102,18 @@ async def test_get_state_round_trip():
             result = await session.call_tool("get_state", {})
     text = _text(result)
     data = json.loads(text)
-    for key in ("projects", "tasks", "calendar", "priority_ranking"):
-        assert key in data, f"missing key {key} in state"
+    assert "calendar" in data, f"missing 'calendar' key in state: {list(data)}"
 
 
 @pytest.mark.asyncio
 async def test_apply_instruction_adds_calendar_entry():
-    """Issue an `apply_instruction` and confirm the deploy mutated state.
-
-    We use a unique marker so the LLM is forced to add something new
-    rather than declaring an existing entry "already there". The test
-    accepts mutation in either `tasks` or `calendar` because the agent
-    legitimately decides between the two based on whether a precise time
-    was specified."""
+    """Issue an `apply_instruction` and confirm the deploy mutated state."""
     import uuid as _uuid
 
     marker = f"deploy-probe-{_uuid.uuid4().hex[:8]}"
     instruction = (
         f"Add a calendar entry for tomorrow at 8am for one hour titled "
-        f"'Go to the gym ({marker})'. If no Health project exists, also add one."
+        f"'Morning run ({marker})'."
     )
     try:
         async with sse_client(_sse_url()) as (read, write):
@@ -148,20 +125,15 @@ async def test_apply_instruction_adds_calendar_entry():
         assert not result.isError, f"intake call failed: {_text(result)}"
         data = json.loads(_text(result))
 
-        # apply_instruction returns either {applied, diff} or {applied, clarifications}.
         if not data.get("applied", False):
             assert "clarifications" in data and data["clarifications"]
             return
 
         diff = data["diff"]
-        # Look for the marker anywhere in calendar OR tasks — the agent
-        # legitimately picks the better bucket, and we don't want to fail
-        # the deploy gate on that judgment call.
+        section = diff.get("calendar") or {}
         candidates: list[dict] = []
-        for bucket in ("calendar", "tasks"):
-            section = diff.get(bucket) or {}
-            candidates.extend(section.get("added") or [])
-            candidates.extend(c.get("after") for c in (section.get("changed") or []))
+        candidates.extend(section.get("added") or [])
+        candidates.extend(c.get("after") for c in (section.get("changed") or []))
         candidates = [c for c in candidates if c]
 
         blob = json.dumps(candidates).lower()
