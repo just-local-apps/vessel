@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Vessel — disclaimer</title>
+  <link rel="icon" href="/pwa/icon-512.png" />
+  <link rel="stylesheet" href="/pwa/styles.css" />
+  <style>
+    .disclaimer-wrap {
+      max-width: 440px;
+      margin: 0 auto;
+      padding: env(safe-area-inset-top, 20px) 24px calc(40px + env(safe-area-inset-bottom));
+    }
+    .disclaimer-wrap h1 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin: 32px 0 6px;
+      letter-spacing: 0.03em;
+    }
+    .disclaimer-wrap p {
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin: 0 0 20px;
+    }
+    .back-link {
+      display: inline-block;
+      margin: 24px 0 8px;
+      font-size: 0.82rem;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .back-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="disclaimer-wrap">
+    <a href="/pwa/" class="back-link">← back</a>
+
+    <h1>no warranty</h1>
+    <p>Vessel is a hobby project built and run by one person. It is provided as-is, with no guarantees of uptime, correctness, or data durability. Things can break. Data can get lost. I am not responsible for any of it.</p>
+
+    <h1>your data</h1>
+    <p>This app is built for convenience — easy calendar creation from pasted text — not for storing private or sensitive information.</p>
+    <p>Calendar data is encrypted in the database. This guards against someone hacking the database and getting everything, but it is not a privacy guarantee. What you type can appear in server logs, and the person running this server (me) can see it. Do not use this app to store anything you need to keep secret.</p>
+    <p>Everything you type into the chat is also sent to a third-party AI (Groq) to be parsed. I have no control over Groq's data retention.</p>
+
+    <h1>your key</h1>
+    <p>The passphrase you use to log in is the only way to access your account. There is no password reset, no recovery email, no backup. If you lose it, your data is gone.</p>
+
+    <h1>no support</h1>
+    <p>There is no support, no SLA, and no promise that this app will still exist tomorrow. Use it at your own risk.</p>
+
+    <a href="/pwa/" class="back-link">← back to vessel</a>
+  </div>
+</body>
+</html>

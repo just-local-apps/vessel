@@ -1,0 +1,36 @@
+app = "vessel-ravi"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  PORT = "8080"
+  HOST = "0.0.0.0"
+  TIMEZONE = "America/Los_Angeles"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # Single-machine: SseServerTransport keeps MCP session state per-process.
+  # Multiple VMs would split GET /mcp/sse from POST /mcp/messages and 404.
+  min_machines_running = 1
+  max_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 100
+    hard_limit = 150
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Vessel</title>
+  <link rel="manifest" href="/pwa/manifest.json" />
+  <link rel="icon" href="/pwa/icon-512.png" />
+  <link rel="apple-touch-icon" href="/pwa/icon-512.png" />
+  <link rel="stylesheet" href="/pwa/styles.css" />
+</head>
+<body data-testid="app-body">
+  <main id="app" data-testid="app-root" data-mode="day">
+    <div id="day-label-row" data-testid="day-nav">
+      <span id="day-label" data-testid="day-label"></span>
+      <span id="window-label" data-testid="window-label" hidden></span>
+    </div>
+
+    <div id="pull-indicator" data-testid="pull-indicator">pull to refresh</div>
+    <div id="task-scroll" data-testid="task-scroll">
+      <div id="swipe-area" data-testid="swipe-area">
+        <section id="calendar-list" data-testid="calendar-section">
+          <div id="calendar-events" data-testid="calendar-events"></div>
+          <div id="calendar-empty" data-testid="calendar-empty" hidden>nothing scheduled</div>
+        </section>
+      </div>
+    </div>
+
+    <div id="chat-area" data-testid="chat-area">
+      <!-- Stack of popup cards for items the chat assistant just
+           added / updated. Each card is clickable: tap opens the
+           detail/edit modal for that item; other cards stay visible
+           so the user can edit several in turn. -->
+      <div id="chat-results" data-testid="chat-results" hidden></div>
+      <!-- Plain one-line reply for non-mutating chat turns (questions,
+           errors). Hidden when chat-results is showing. -->
+      <div id="chat-question" data-testid="chat-question" hidden></div>
+      <form id="chat-form" data-testid="chat-form">
+        <input
+          type="text"
+          id="chat-input"
+          data-testid="chat-input"
+          placeholder="tell vessel anything…"
+          autocomplete="off"
+        />
+        <button type="submit" id="chat-send" class="ghost" data-testid="chat-send">↩</button>
+      </form>
+    </div>
+
+    <footer id="footer-nav">
+      <button id="refresh-btn" class="ghost" data-testid="refresh-footer">refresh</button>
+      <a href="/pwa/disclaimer.html" class="ghost footer-link" data-testid="disclaimer-link">disclaimer</a>
+      <button id="clear-token-btn" class="ghost" data-testid="sign-out">sign out</button>
+    </footer>
+  </main>
+
+  <!-- Toast anchored at thumb level for swipe undo. Lives outside #app so
+       it overlays the bottom of the viewport regardless of scroll. -->
+  <div id="undo-toast" data-testid="undo-toast" hidden>
+    <span class="undo-message" data-testid="undo-message"></span>
+    <button type="button" class="undo-button" data-testid="undo-button">undo</button>
+  </div>
+
+  <dialog id="token-dialog" data-testid="token-dialog">
+    <form method="dialog" id="token-form">
+      <p class="token-heading">your key</p>
+      <p class="token-hint">Make up any passphrase — 16+ characters. No email, no signup. Your key is your account.</p>
+      <label for="token-input">access key</label>
+      <input type="password" id="token-input" autocomplete="current-password" required data-testid="token-input" />
+      <p class="token-warning">Lose this key and your data is gone — no recovery, no reset.</p>
+      <p class="token-warning">Not for private data. What you type goes to an AI and may appear in server logs. Database is encrypted against hacks, not against the person running this server.</p>
+      <button type="submit" data-testid="token-submit">continue</button>
+    </form>
+  </dialog>
+
+  <dialog id="skip-dialog" data-testid="skip-dialog">
+    <form method="dialog" id="skip-form">
+      <label id="skip-prompt" for="skip-reason">why are you skipping <span id="skip-task-title">this</span>?</label>
+      <textarea id="skip-reason" rows="3" required data-testid="skip-reason"
+        placeholder="e.g. moved to next week, no longer relevant, blocked on X"></textarea>
+      <div class="dialog-actions">
+        <button type="button" id="skip-cancel" class="ghost" data-testid="skip-cancel">cancel</button>
+        <button type="submit" data-testid="skip-submit">skip</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="detail-dialog" data-testid="detail-dialog">
+    <form method="dialog" id="detail-form">
+      <div class="detail-row">
+        <label for="detail-title">title</label>
+        <input type="text" id="detail-title" data-testid="detail-title" required />
+      </div>
+      <div id="detail-time-fields" hidden>
+        <div class="detail-row-pair">
+          <div class="detail-row">
+            <label for="detail-start">start</label>
+            <input type="datetime-local" id="detail-start" data-testid="detail-start" />
+          </div>
+          <div class="detail-row">
+            <label for="detail-end">end</label>
+            <input type="datetime-local" id="detail-end" data-testid="detail-end" />
+          </div>
+        </div>
+        <div class="detail-row">
+          <label for="detail-arrive-by">arrive by (optional)</label>
+          <input type="datetime-local" id="detail-arrive-by" data-testid="detail-arrive-by" />
+        </div>
+        <div class="detail-row">
+          <label for="detail-location">location</label>
+          <input type="text" id="detail-location" data-testid="detail-location" />
+          <a id="detail-location-map" class="detail-map-link"
+             data-testid="detail-location-map" target="_blank"
+             rel="noopener noreferrer" hidden>open in google maps ↗</a>
+        </div>
+      </div>
+      <div id="detail-task-fields" hidden>
+        <div class="detail-row-pair">
+          <div class="detail-row">
+            <label for="detail-due-date">due date</label>
+            <input type="date" id="detail-due-date" data-testid="detail-due-date" />
+          </div>
+          <div class="detail-row">
+            <label for="detail-est">est. minutes</label>
+            <input type="number" id="detail-est" min="0" data-testid="detail-est" />
+          </div>
+        </div>
+        <div class="detail-row">
+          <label for="detail-start-after">start after (optional)</label>
+          <input type="time" id="detail-start-after" data-testid="detail-start-after" />
+        </div>
+      </div>
+      <div class="detail-row">
+        <label for="detail-url">url</label>
+        <input type="url" id="detail-url" data-testid="detail-url" placeholder="https://…" />
+      </div>
+      <div class="detail-row">
+        <label for="detail-notes">notes</label>
+        <textarea id="detail-notes" rows="4" data-testid="detail-notes"></textarea>
+      </div>
+      <div class="detail-error" id="detail-error" data-testid="detail-error" hidden></div>
+      <div class="detail-actions">
+        <button type="button" id="detail-cancel" class="ghost" data-testid="detail-cancel">close</button>
+        <button type="button" id="detail-delete" class="danger" data-testid="detail-delete">delete</button>
+        <button type="submit" id="detail-save" data-testid="detail-save">save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="move-dialog" data-testid="move-dialog">
+    <label>move <span id="move-event-title">this event</span> to…</label>
+    <div class="dialog-grid">
+      <button type="button" data-minutes="10" data-testid="move-10">+10 min</button>
+      <button type="button" data-minutes="30" data-testid="move-30">+30 min</button>
+      <button type="button" data-minutes="60" data-testid="move-60">+1 hour</button>
+      <button type="button" id="move-skip" class="danger" data-testid="move-skip">skip event</button>
+    </div>
+    <button type="button" id="move-cancel" class="ghost" data-testid="move-cancel">cancel</button>
+  </dialog>
+
+  <script src="/pwa/app.js" type="module"></script>
+</body>
+</html>
