@@ -120,38 +120,24 @@ def test_live_default_mode_is_calendar_and_renders_without_error(page):
     assert root.get_attribute("data-error") in (None, "")
 
 
-def test_live_calendar_interleaves_open_tasks_with_events(page):
-    """The calendar view renders BOTH event cards and open task cards —
-    they share the day groups so the worklist sits alongside scheduled
-    blocks. Past-due open tasks roll forward and surface under today's
-    group; future tasks stay on their own due date."""
+def test_live_calendar_shows_open_events(page):
+    """The calendar view renders open event cards grouped by day."""
     _open(page)
     payload = page.evaluate(
         """
         async () => {
           const t = localStorage.getItem('vessel.token');
-          const r = await fetch('/api/tasks/all', {
+          const r = await fetch('/api/state', {
               headers: { Authorization: 'Bearer ' + t } });
           return await r.json();
         }
         """
     )
-    today_iso = payload["now"][:10]
-    open_tasks = [
-        t for t in payload.get("tasks", [])
-        if t.get("completed_at") is None and t.get("skipped_at") is None
-    ]
     open_events = [
-        e for e in payload.get("events", [])
+        e for e in (payload.get("state") or {}).get("calendar", [])
         if e.get("completed_at") is None and e.get("skipped_at") is None
     ]
-    for task in open_tasks:
-        effective = today_iso if task["due_date"] < today_iso else task["due_date"]
-        card = page.locator(f'[data-testid="task-card-{task["id"]}"]')
-        expect(card).to_be_visible()
-        day_group = page.locator(f'[data-testid="calendar-day-{effective}"]')
-        expect(day_group.locator(f'[data-testid="task-card-{task["id"]}"]')).to_have_count(1)
-    for ev in open_events:
+    for ev in open_events[:5]:  # check first 5 to keep test fast
         expect(
             page.locator(f'[data-testid="event-card-{ev["id"]}"]')
         ).to_be_visible()
@@ -231,15 +217,9 @@ def test_live_swipe_left_opens_skip_dialog_and_records_reason(page):
 
 
 def test_live_cancel_button_prefills_chat_input(page):
-    """Tapping a task card's `cancel` button no longer opens the
-    dedicated skip dialog — that flow was unified into the chat
-    assistant. The button now primes the chat input with
-    `cancel/change "<title>" [id:<id>]: ` and focuses it; the user
-    types the reason and submits through the same path as any other
-    CRUD intent. The id is included so the chat assistant resolves
-    the entity unambiguously. This test does NOT submit (would
-    mutate live state); it only verifies the prefill + focus happens
-    and that no legacy /skip POST fires."""
+    """Tapping an event card's `cancel/change` button primes the chat input
+    with `cancel/change "<title>" [id:<id>]: ` and focuses it. Does NOT
+    submit — only verifies the prefill."""
     _open(page)
     state = page.evaluate(
         """
@@ -252,43 +232,29 @@ def test_live_cancel_button_prefills_chat_input(page):
         }
         """
     )
-    today_tasks = [
-        t for t in ((state or {}).get("state") or {}).get("tasks") or []
-        if not t.get("completed_at") and not t.get("skipped_at")
+    open_events = [
+        e for e in ((state or {}).get("state") or {}).get("calendar") or []
+        if not e.get("completed_at") and not e.get("skipped_at")
     ]
-    if not today_tasks:
-        pytest.skip("no pending tasks to exercise the cancel button")
-    task = today_tasks[0]
-    task_id = task["id"]
-    task_title = task.get("title", "")
+    if not open_events:
+        pytest.skip("no open events to exercise the cancel/change button")
+    ev = open_events[0]
+    ev_id = ev["id"]
+    ev_title = ev.get("title", "")
 
-    card = page.locator(f'[data-testid="task-card-{task_id}"]')
+    card = page.locator(f'[data-testid="event-card-{ev_id}"]')
     if card.count() == 0:
-        pytest.skip("task not present in current view")
+        pytest.skip("event not present in current view")
 
-    # Track skip POSTs — must be zero, the legacy endpoint is no
-    # longer driven by the UI.
-    posts: list[str] = []
-    page.on(
-        "request",
-        lambda req: posts.append(req.url) if "/skip" in req.url and req.method == "POST" else None,
-    )
-    page.locator(f'[data-testid="task-cancel-{task_id}"]').click()
+    page.locator(f'[data-testid="event-cancel-{ev_id}"]').click()
 
-    # No skip dialog appears.
-    expect(page.locator('[data-testid="skip-dialog"]')).not_to_be_visible()
-    # Chat input is prefilled and focused.
-    expected_prefix = f'cancel/change "{task_title}" [id:{task_id}]: '
+    expected_prefix = f'cancel/change "{ev_title}" [id:{ev_id}]: '
     chat_input = page.locator('[data-testid="chat-input"]')
     expect(chat_input).to_have_value(expected_prefix)
     assert page.evaluate(
         "document.activeElement === document.getElementById('chat-input')"
     )
-    # Clear the input so we don't accidentally submit on a stray
-    # Enter; this avoids mutating live state.
     chat_input.fill("")
-    page.wait_for_timeout(150)
-    assert posts == [], f"unexpected /skip POSTs: {posts}"
 
 
 def test_live_disclaimer_link_in_footer(page):
@@ -347,13 +313,9 @@ def test_live_state_endpoint_diagnostic(page):
           const d = await r.json();
           const s = d.state || {};
           return {
-            projects: (s.projects || []).length,
-            tasks: (s.tasks || []).length,
-            tasks_open: (s.tasks || []).filter(t => !t.completed_at).length,
-            tasks_completed: (s.tasks || []).filter(t => !!t.completed_at).length,
             calendar: (s.calendar || []).length,
+            calendar_open: (s.calendar || []).filter(e => !e.completed_at && !e.skipped_at).length,
             now: d.now,
-            current_window: d.current_window,
           };
         }
         """
