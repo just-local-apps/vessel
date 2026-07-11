@@ -46,3 +46,31 @@ within a release. Pydantic's `@computed_field` makes derivation cheap;
 there is no excuse to denormalize.
 
 When in doubt, derive.
+
+## No secrets in the repository
+
+This is a public repo. Never commit secrets, credentials, or private data.
+
+**Hard rules:**
+
+1. **No real tokens or API keys** in any tracked file — not in source, not in
+   tests, not in config, not in `.claude/settings.json` permission allowlists.
+   Use environment variable references (`$VAR` or `os.getenv("VAR")`) only.
+
+2. **No real connection strings** with embedded credentials
+   (`postgresql://user:pass@host/db`). `.env.example` uses placeholders only.
+
+3. **No personal data** — real names tied to private context, phone numbers,
+   addresses, or appointment details must never appear in source files or test
+   fixtures.
+
+4. **`.claude/` is gitignored.** Do not add it back to tracking. Permission
+   allowlists in `settings.json` must never contain inline token values.
+
+5. **Test fixtures use fake values.** Any token, key, or credential in a test
+   must be an obviously fake placeholder (`"test-token-of-sufficient-length"`,
+   `"fake"`, generated in the test itself). Never copy a real value into a test.
+
+**Before every commit:** if a value looks like a real secret — long random
+string, matches a known key format (`sk-`, `eyJ`, `tgp_v1_`, base64 blob) —
+stop and move it to `.env` instead.
