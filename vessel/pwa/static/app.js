@@ -1,8 +1,6 @@
 const TOKEN_KEY = "vessel.token";
 
-// Single-view app: the calendar is the home screen. Events and open
-// tasks are interleaved per day; tasks whose due_date is in the past
-// roll forward to today (client-side display only — no state mutation).
+// Single-view app: the calendar is the only screen.
 const state = { mode: "calendar" };
 
 function getToken() {
@@ -338,24 +336,12 @@ function showUndoToast(message, undoFn) {
   };
 }
 
-async function completeTask(taskId) {
-  await api(`/api/tasks/${taskId}/complete`, { method: "POST" });
-}
-
-async function uncompleteTask(taskId) {
-  return api(`/api/tasks/${taskId}/uncomplete`, { method: "POST" });
-}
-
 async function completeEvent(eventId) {
   await api(`/api/events/${eventId}/complete`, { method: "POST" });
 }
 
 async function uncompleteEvent(eventId) {
   return api(`/api/events/${eventId}/uncomplete`, { method: "POST" });
-}
-
-async function unskipTask(taskId) {
-  return api(`/api/tasks/${taskId}/unskip`, { method: "POST" });
 }
 
 async function unskipEvent(eventId) {
@@ -717,100 +703,6 @@ function attachCardSwipe(card, item) {
   });
 }
 
-function renderTaskCard(task, { pushable = true } = {}) {
-  const card = document.createElement("div");
-  card.className = "task-card";
-  card.dataset.testid = `task-card-${task.id}`;
-  card.dataset.taskId = task.id;
-  card.dataset.kind = "task";
-  const isCompleted = task.completed_at != null;
-  if (isCompleted) {
-    card.classList.add("completed");
-    card.dataset.completed = "true";
-  }
-
-  const title = document.createElement("div");
-  title.className = "task-title";
-  title.dataset.testid = `task-title-${task.id}`;
-  title.textContent = task.title;
-  card.appendChild(title);
-
-  const meta = document.createElement("div");
-  meta.className = "task-meta";
-  const est = task.estimated_minutes ? `${task.estimated_minutes} min` : "";
-  const completedTag = isCompleted ? "done" : "";
-  meta.textContent = [task.tier, task.time_window, est, completedTag]
-    .filter(Boolean)
-    .join(" · ");
-  card.appendChild(meta);
-
-  if (task.notes) {
-    const notes = document.createElement("div");
-    notes.className = "task-notes";
-    notes.dataset.testid = `task-notes-${task.id}`;
-    notes.textContent = task.notes;
-    card.appendChild(notes);
-  }
-
-  if (task.url) {
-    const link = document.createElement("a");
-    link.className = "task-url";
-    link.href = task.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = task.url;
-    // Stop swipe gestures from being interpreted by the card when the
-    // user is tapping the link itself.
-    link.addEventListener("pointerdown", (e) => e.stopPropagation());
-    card.appendChild(link);
-  }
-
-  attachCardTap(card, () => openDetailDialog("task", task));
-
-  if (isCompleted) return card;
-
-  // Same explicit-button row tasks get in the all-tasks list. The
-  // focus card keeps its swipe gestures; the multi-row list views are
-  // where accidental swipes during scroll were costing the user work.
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-  actions.appendChild(
-    _actionButton({
-      label: "done",
-      kind: "primary",
-      testid: `task-done-${task.id}`,
-      handler: async () => {
-        await completeTask(task.id);
-        showUndoToast("marked done", () => uncompleteTask(task.id));
-        await refresh();
-      },
-    })
-  );
-  actions.appendChild(
-    _actionButton({
-      label: "change",
-      kind: "ghost",
-      testid: `task-change-${task.id}`,
-      handler: () => openDetailDialog("task", task),
-    })
-  );
-  actions.appendChild(
-    _actionButton({
-      label: "cancel",
-      kind: "danger",
-      testid: `task-cancel-${task.id}`,
-      // Same as the event cancel/change path: hand the intent to the
-      // chat assistant. The user types why they want to cancel/change
-      // (or anything else) in the chat bar; the assistant decides
-      // delete vs. reschedule vs. update. Results show as popup cards
-      // above the chat input.
-      handler: () => focusChatWithChangeRequest("task", task.id, task.title),
-    })
-  );
-  card.appendChild(actions);
-  return card;
-}
-
 function dayLabel(offset, isoDate) {
   if (offset === 0) return "today";
   if (offset === -1) return "yesterday";
@@ -825,54 +717,30 @@ function clearTaskSections() {
   document.getElementById("calendar-empty").hidden = true;
 }
 
-function _taskSortMinutes(task) {
-  // Minutes-since-midnight for ordering inside a day. Tasks with a
-  // `start_after` clock gate sort to that time of day; untimed tasks
-  // sort to the end of the day so they appear AFTER all scheduled
-  // events — "fit me in around your meetings".
-  if (!task.start_after) return 24 * 60 + 1;
-  const m = String(task.start_after).match(/^(\d{2}):(\d{2})/);
-  if (!m) return 24 * 60 + 1;
-  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-}
-
 function _eventSortMinutes(event) {
   const d = new Date(event.start);
   return d.getHours() * 60 + d.getMinutes();
 }
 
 async function renderCalendar() {
-  // The home screen. Calendar events AND open tasks for every day
-  // Vessel knows about, grouped by date, ordered chronologically inside
-  // each day. Tasks slot in alongside events using their `start_after`
-  // gate as a time-of-day; untimed tasks sink to the bottom of the day.
-  //
-  // Fluid rollover: an open task whose `due_date` is in the past gets
-  // displayed under today's group instead. Pure client-side projection
-  // — `due_date` on the server is unchanged, so completing the task
-  // closes it cleanly without any data migration.
-  const data = await api("/api/tasks/all");
+  const data = await api("/api/state");
   const todayIso = data.now.slice(0, 10);
 
-  const events = (data.events || []).filter(
+  const events = ((data.state && data.state.calendar) || []).filter(
     (e) => e.completed_at == null && e.skipped_at == null
-  );
-  const openTasks = (data.tasks || []).filter(
-    (t) => t.completed_at == null && t.skipped_at == null
   );
 
   document.getElementById("day-label").textContent = "calendar";
   document.getElementById("day-label").hidden = false;
   const win = document.getElementById("window-label");
-  const totalItems = events.length + openTasks.length;
-  win.textContent = `${totalItems}`;
-  win.hidden = totalItems === 0;
+  win.textContent = `${events.length}`;
+  win.hidden = events.length === 0;
 
   clearTaskSections();
   const container = document.getElementById("calendar-events");
   const empty = document.getElementById("calendar-empty");
 
-  if (totalItems === 0) {
+  if (events.length === 0) {
     empty.hidden = false;
     return;
   }
@@ -884,18 +752,8 @@ async function renderCalendar() {
     if (!eventsByDay.has(k)) eventsByDay.set(k, []);
     eventsByDay.get(k).push(ev);
   }
-  // Bucket tasks by effective date (rolled forward if past-due).
-  const tasksByDay = new Map();
-  for (const t of openTasks) {
-    const effective = t.due_date < todayIso ? todayIso : t.due_date;
-    if (!tasksByDay.has(effective)) tasksByDay.set(effective, []);
-    tasksByDay.get(effective).push(t);
-  }
 
-  const allKeys = new Set([...eventsByDay.keys(), ...tasksByDay.keys()]);
-  const sortedKeys = [...allKeys].sort();
-  // Anchor on today (or the first day on or after today, falling back
-  // to the latest known day) so the scroll lands on the current day.
+  const sortedKeys = [...eventsByDay.keys()].sort();
   const anchorIso =
     sortedKeys.find((iso) => iso >= todayIso) || sortedKeys[sortedKeys.length - 1];
 
@@ -903,7 +761,6 @@ async function renderCalendar() {
     const dayEvents = (eventsByDay.get(iso) || [])
       .slice()
       .sort((a, b) => a.start.localeCompare(b.start));
-    const dayTasks = (tasksByDay.get(iso) || []).slice();
     const group = document.createElement("div");
     group.className = "all-day-group";
     group.dataset.testid = `calendar-day-${iso}`;
@@ -916,36 +773,15 @@ async function renderCalendar() {
     h.textContent = dayLabel(offset, iso);
     group.appendChild(h);
 
-    // Cluster overlapping events first — conflict detection only makes
-    // sense among events, which have explicit time ranges. Tasks have
-    // no end time, so they never participate in clusters.
     const clusters = _clusterByOverlap(dayEvents);
-    // Build a flat list of timeline items: each event-cluster gets the
-    // start time of its earliest event; each task gets its start_after
-    // minutes (or end-of-day for untimed). Sort, then render.
-    const items = [];
     for (const cluster of clusters) {
-      items.push({
-        kind: "event-cluster",
-        cluster,
-        sort: _eventSortMinutes(cluster[0]),
-      });
-    }
-    for (const t of dayTasks) {
-      items.push({ kind: "task", task: t, sort: _taskSortMinutes(t) });
-    }
-    items.sort((a, b) => a.sort - b.sort);
-
-    for (const item of items) {
-      if (item.kind === "task") {
-        group.appendChild(renderTaskCard(item.task));
-      } else if (item.cluster.length === 1) {
-        group.appendChild(renderEventCard(item.cluster[0]));
+      if (cluster.length === 1) {
+        group.appendChild(renderEventCard(cluster[0]));
       } else {
         const wrapper = document.createElement("div");
         wrapper.className = "overlap-cluster";
-        wrapper.dataset.testid = `overlap-cluster-${item.cluster[0].id}`;
-        for (const ev of item.cluster) {
+        wrapper.dataset.testid = `overlap-cluster-${cluster[0].id}`;
+        for (const ev of cluster) {
           wrapper.appendChild(renderEventCard(ev));
         }
         group.appendChild(wrapper);
@@ -954,7 +790,6 @@ async function renderCalendar() {
     container.appendChild(group);
   }
 
-  // Defer one frame so layout has settled before scrollIntoView fires.
   const anchor = container.querySelector('[data-calendar-anchor="true"]');
   if (anchor) {
     requestAnimationFrame(() => {
@@ -1227,18 +1062,17 @@ function _syncDetailMapLink() {
   link.href = _mapsHref(value);
 }
 
-let _detailContext = null; // { kind: "event"|"task", id, original }
+let _detailContext = null; // { id, original }
 
-function openDetailDialog(kind, item) {
+function openDetailDialog(_kind, item) {
   const dialog = document.getElementById("detail-dialog");
   if (!dialog) return;
-  _detailContext = { kind, id: item.id, original: item };
+  _detailContext = { id: item.id, original: item };
 
   const titleEl = document.getElementById("detail-title");
   const urlEl = document.getElementById("detail-url");
   const notesEl = document.getElementById("detail-notes");
   const timeFields = document.getElementById("detail-time-fields");
-  const taskFields = document.getElementById("detail-task-fields");
   const errorEl = document.getElementById("detail-error");
 
   errorEl.hidden = true;
@@ -1246,28 +1080,15 @@ function openDetailDialog(kind, item) {
   titleEl.value = item.title || "";
   urlEl.value = item.url || "";
 
-  if (kind === "event") {
-    timeFields.hidden = false;
-    taskFields.hidden = true;
-    document.getElementById("detail-start").value = _isoToLocalInput(item.start);
-    document.getElementById("detail-end").value = _isoToLocalInput(item.end);
-    document.getElementById("detail-arrive-by").value = _isoToLocalInput(
-      item.arrive_by
-    );
-    const locInput = document.getElementById("detail-location");
-    locInput.value = item.location || "";
-    _syncDetailMapLink();
-    locInput.oninput = _syncDetailMapLink;
-    notesEl.value = item.description || "";
-  } else {
-    timeFields.hidden = true;
-    taskFields.hidden = false;
-    document.getElementById("detail-due-date").value = item.due_date || "";
-    document.getElementById("detail-est").value =
-      item.estimated_minutes != null ? item.estimated_minutes : "";
-    document.getElementById("detail-start-after").value = item.start_after || "";
-    notesEl.value = item.notes || "";
-  }
+  timeFields.hidden = false;
+  document.getElementById("detail-start").value = _isoToLocalInput(item.start);
+  document.getElementById("detail-end").value = _isoToLocalInput(item.end);
+  document.getElementById("detail-arrive-by").value = _isoToLocalInput(item.arrive_by);
+  const locInput = document.getElementById("detail-location");
+  locInput.value = item.location || "";
+  _syncDetailMapLink();
+  locInput.oninput = _syncDetailMapLink;
+  notesEl.value = item.description || "";
   dialog.showModal();
 }
 
@@ -1300,52 +1121,23 @@ function openDetailDialog(kind, item) {
     }
     const url = document.getElementById("detail-url").value.trim() || null;
     const notesValue = document.getElementById("detail-notes").value;
-
-    let endpoint, payload;
-    if (ctx.kind === "event") {
-      const start = _localInputToIso(
-        document.getElementById("detail-start").value
-      );
-      const end = _localInputToIso(
-        document.getElementById("detail-end").value
-      );
-      if (!start || !end) {
-        showError("start and end are required");
-        return;
-      }
-      payload = {
-        title,
-        start,
-        end,
-        arrive_by: _localInputToIso(
-          document.getElementById("detail-arrive-by").value
-        ),
-        location: document.getElementById("detail-location").value.trim() || null,
-        url,
-        description: notesValue,
-      };
-      endpoint = `/api/calendar/${encodeURIComponent(ctx.id)}`;
-    } else {
-      const dueDate = document.getElementById("detail-due-date").value;
-      if (!dueDate) {
-        showError("due date is required");
-        return;
-      }
-      const estRaw = document.getElementById("detail-est").value;
-      const startAfter = document.getElementById("detail-start-after").value;
-      payload = {
-        title,
-        due_date: dueDate,
-        estimated_minutes: estRaw === "" ? null : parseInt(estRaw, 10),
-        start_after: startAfter || null,
-        url,
-        notes: notesValue || null,
-      };
-      endpoint = `/api/tasks/${encodeURIComponent(ctx.id)}`;
+    const start = _localInputToIso(document.getElementById("detail-start").value);
+    const end = _localInputToIso(document.getElementById("detail-end").value);
+    if (!start || !end) {
+      showError("start and end are required");
+      return;
     }
-
+    const payload = {
+      title,
+      start,
+      end,
+      arrive_by: _localInputToIso(document.getElementById("detail-arrive-by").value),
+      location: document.getElementById("detail-location").value.trim() || null,
+      url,
+      description: notesValue,
+    };
     try {
-      await api(endpoint, {
+      await api(`/api/calendar/${encodeURIComponent(ctx.id)}`, {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
@@ -1360,20 +1152,11 @@ function openDetailDialog(kind, item) {
   deleteBtn.addEventListener("click", async () => {
     if (!_detailContext) return;
     const ctx = _detailContext;
-    const noun = ctx.kind === "event" ? "event" : "task";
-    if (!confirm(`Delete this ${noun}? This can't be undone.`)) return;
-    const endpoint =
-      ctx.kind === "event"
-        ? `/api/calendar/${encodeURIComponent(ctx.id)}`
-        : `/api/tasks/${encodeURIComponent(ctx.id)}`;
+    if (!confirm("Delete this event? This can't be undone.")) return;
     try {
-      await api(endpoint, { method: "DELETE" });
+      await api(`/api/calendar/${encodeURIComponent(ctx.id)}`, { method: "DELETE" });
       _detailContext = null;
       dialog.close();
-      // Drop back to focus mode after a delete from the calendar/all
-      // list — refreshing the same list with one fewer entry keeps the
-      // user in context, but if they deleted the only item in view it
-      // would render an empty section. Refresh in current mode is safer.
       await refresh();
     } catch (err) {
       showError(`delete failed: ${err.message || err}`);
@@ -1423,10 +1206,7 @@ async function withBusy(btn, fn) {
 // reads the id to look up the entity, then falls back to the title
 // only if the id is missing.
 
-function focusChatWithChangeRequest(kind, id, title) {
-  // kind is "event" | "task" — currently both share the same prefix;
-  // kept as a parameter so we can specialize the prompt later without
-  // touching call sites.
+function focusChatWithChangeRequest(_kind, id, title) {
   const input = document.getElementById("chat-input");
   if (!input) return;
   const prefix = `cancel/change "${title}" [id:${id}]: `;
@@ -1460,7 +1240,7 @@ function _renderChatResultCard({ kind, action, item, title, meta }) {
   const card = document.createElement("div");
   card.className = "chat-result-card";
   card.dataset.testid = `chat-result-${kind}-${action}-${item ? item.id : "n"}`;
-  const clickable = (kind === "event" || kind === "task") && action !== "deleted";
+  const clickable = kind === "event" && action !== "deleted";
   card.dataset.clickable = clickable ? "true" : "false";
 
   const body = document.createElement("div");
@@ -1491,21 +1271,16 @@ function _renderChatResultCard({ kind, action, item, title, meta }) {
 
   if (clickable) {
     card.addEventListener("click", async () => {
-      // Re-fetch the latest copy of the item before opening the modal
-      // so edits done since the chat ran (or by the chat itself, in
-      // case the diff snapshot drifted from current state after a
-      // refresh) show through. Fall back to the diff snapshot if the
-      // fetch fails or the item is gone.
       let fresh = item;
       try {
-        const data = await api("/api/tasks/all");
-        const list = kind === "event" ? data.events || [] : data.tasks || [];
+        const data = await api("/api/state");
+        const list = (data.state && data.state.calendar) || [];
         const found = list.find((x) => x.id === item.id);
         if (found) fresh = found;
       } catch (_err) {
         /* keep snapshot */
       }
-      openDetailDialog(kind, fresh);
+      openDetailDialog("event", fresh);
     });
   }
   return card;
@@ -1519,24 +1294,13 @@ function _eventMeta(ev) {
   }
 }
 
-function _taskMeta(t) {
-  const due = t.due_date ? `due ${t.due_date}` : "";
-  const after = t.start_after ? `after ${String(t.start_after).slice(0, 5)}` : "";
-  return [due, after].filter(Boolean).join(" · ") || "task";
-}
-
 function renderChatResults(diff) {
-  // Build the popup stack for whatever the chat assistant just did.
-  // Order: events, tasks, projects; added before changed before
-  // removed within each group so newly created items land at the top.
   const container = _chatResultsContainer();
   if (!container) return;
   container.innerHTML = "";
 
   const cards = [];
   const cal = (diff && diff.calendar) || { added: [], changed: [], removed: [] };
-  const tasks = (diff && diff.tasks) || { added: [], changed: [], removed: [] };
-  const projects = (diff && diff.projects) || { added: [], changed: [], removed: [] };
 
   for (const ev of cal.added) {
     cards.push(_renderChatResultCard({
@@ -1558,47 +1322,6 @@ function renderChatResults(diff) {
       kind: "event", action: "deleted", item: ev,
       title: ev.title || "(untitled event)",
       meta: "deleted event",
-    }));
-  }
-  for (const t of tasks.added) {
-    cards.push(_renderChatResultCard({
-      kind: "task", action: "added", item: t,
-      title: t.title || "(untitled task)",
-      meta: `new task · ${_taskMeta(t)}`,
-    }));
-  }
-  for (const ch of tasks.changed) {
-    const t = ch.after;
-    cards.push(_renderChatResultCard({
-      kind: "task", action: "changed", item: t,
-      title: t.title || "(untitled task)",
-      meta: `updated task · ${_taskMeta(t)}`,
-    }));
-  }
-  for (const t of tasks.removed) {
-    cards.push(_renderChatResultCard({
-      kind: "task", action: "deleted", item: t,
-      title: t.title || "(untitled task)",
-      meta: "deleted task",
-    }));
-  }
-  for (const p of projects.added) {
-    cards.push(_renderChatResultCard({
-      kind: "project", action: "added", item: p,
-      title: p.name || p.id, meta: "new project",
-    }));
-  }
-  for (const ch of projects.changed) {
-    const p = ch.after;
-    cards.push(_renderChatResultCard({
-      kind: "project", action: "changed", item: p,
-      title: p.name || p.id, meta: "updated project",
-    }));
-  }
-  for (const p of projects.removed) {
-    cards.push(_renderChatResultCard({
-      kind: "project", action: "deleted", item: p,
-      title: p.name || p.id, meta: "deleted project",
     }));
   }
 
