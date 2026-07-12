@@ -444,7 +444,6 @@ button.ghost {
 }
 
 button.danger { background: transparent; color: #f87171; border: 1px solid #7f1d1d; }
-button.danger.armed { background: #7f1d1d; color: #fca5a5; }
 
 /* Playing-card style for the focus mode's single card. The full
    row is reused for layout (so the swipe handler keeps working), but

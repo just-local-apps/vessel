@@ -268,12 +268,11 @@ def test_tap_event_card_opens_detail_dialog_with_editable_fields(page_factory):
 
 
 def test_delete_event_from_detail_dialog_removes_it_from_calendar(page_factory):
-    """Clicking the delete button in the detail dialog sends DELETE
-    /api/calendar/{id} and removes the event from the calendar list.
+    """Clicking delete once sends DELETE /api/calendar/{id} immediately
+    and removes the event from the calendar list — no confirmation step.
 
-    Regression: window.confirm() is suppressed by Chrome when called
-    from within a <dialog> element — the confirm returned false silently
-    and the DELETE never fired. The fix removes confirm() entirely."""
+    Regression: window.confirm() inside a <dialog> is suppressed by
+    Chrome, returning false silently so DELETE never fired."""
     today = datetime.now().date()
     page, url, box = page_factory(make_state_with_calendar_only(today))
     _open(page, url)
@@ -285,17 +284,13 @@ def test_delete_event_from_detail_dialog_removes_it_from_calendar(page_factory):
     page.locator('[data-testid="event-card-ev-gym"]').click()
     expect(page.locator('[data-testid="detail-dialog"]')).to_be_visible()
 
-    # Two-step delete: first click arms the button, second fires the DELETE.
-    delete_btn = page.locator('[data-testid="detail-delete"]')
-    delete_btn.click()
-    expect(delete_btn).to_have_text("confirm delete?")
-
+    # Single click deletes immediately — no confirmation dialog.
     with page.expect_response(
         lambda r: "/api/calendar/ev-gym" in r.url
         and r.request.method == "DELETE"
         and r.status == 200
     ):
-        delete_btn.click()
+        page.locator('[data-testid="detail-delete"]').click()
 
     # Dialog closes and event is gone from the list.
     expect(page.locator('[data-testid="detail-dialog"]')).to_be_hidden()
