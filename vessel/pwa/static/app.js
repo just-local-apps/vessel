@@ -1149,10 +1149,34 @@ function openDetailDialog(_kind, item) {
     }
   });
 
+  // Two-step delete: first click arms the button (shows "confirm delete?"),
+  // second click within 4s fires the DELETE. Avoids window.confirm() which
+  // Chrome silently suppresses when called from inside a <dialog> element.
+  let _deleteArmed = false;
+  let _deleteArmTimer = null;
+
+  function _armDelete() {
+    _deleteArmed = true;
+    deleteBtn.textContent = "confirm delete?";
+    deleteBtn.classList.add("armed");
+    _deleteArmTimer = setTimeout(() => {
+      _deleteArmed = false;
+      deleteBtn.textContent = "delete";
+      deleteBtn.classList.remove("armed");
+    }, 4000);
+  }
+
   deleteBtn.addEventListener("click", async () => {
     if (!_detailContext) return;
+    if (!_deleteArmed) {
+      _armDelete();
+      return;
+    }
+    clearTimeout(_deleteArmTimer);
+    _deleteArmed = false;
+    deleteBtn.textContent = "delete";
+    deleteBtn.classList.remove("armed");
     const ctx = _detailContext;
-    if (!confirm("Delete this event? This can't be undone.")) return;
     try {
       await api(`/api/calendar/${encodeURIComponent(ctx.id)}`, { method: "DELETE" });
       _detailContext = null;
